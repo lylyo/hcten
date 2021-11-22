@@ -1,79 +1,61 @@
-﻿using System;
-using System.Net;
-using System.Windows.Forms;
+﻿using System.Net;
+using Netch.Properties;
+using Netch.Utils;
 
-namespace Netch.Forms
+namespace Netch.Forms;
+
+[Fody.ConfigureAwait(true)]
+public partial class GlobalBypassIPForm : Form
 {
-    public partial class GlobalBypassIPForm : Form
+    public GlobalBypassIPForm()
     {
-        public GlobalBypassIPForm()
+        InitializeComponent();
+        Icon = Resources.icon;
+    }
+
+    private void GlobalBypassIPForm_Load(object sender, EventArgs e)
+    {
+        i18N.TranslateForm(this);
+
+        IPListBox.Items.AddRange(Global.Settings.TUNTAP.BypassIPs.Cast<object>().ToArray());
+
+        for (var i = 32; i >= 1; i--)
+            PrefixComboBox.Items.Add(i);
+
+        PrefixComboBox.SelectedIndex = 0;
+    }
+
+    private void AddButton_Click(object sender, EventArgs e)
+    {
+        if (!string.IsNullOrEmpty(IPTextBox.Text))
         {
-            InitializeComponent();
-        }
-
-        private void GlobalBypassIPForm_Load(object sender, EventArgs e)
-        {
-            Text = Utils.i18N.Translate(Text);
-            AddButton.Text = Utils.i18N.Translate(AddButton.Text);
-            DeleteButton.Text = Utils.i18N.Translate(DeleteButton.Text);
-            ControlButton.Text = Utils.i18N.Translate(ControlButton.Text);
-
-            IPListBox.Items.AddRange(Global.Settings.BypassIPs.ToArray());
-
-            for (var i = 32; i >= 1; i--)
-            {
-                PrefixComboBox.Items.Add(i);
-            }
-            PrefixComboBox.SelectedIndex = 0;
-        }
-
-        private void GlobalBypassIPForm_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            Global.SettingForm.Show();
-        }
-
-        private void AddButton_Click(object sender, EventArgs e)
-        {
-            if (!string.IsNullOrEmpty(IPTextBox.Text))
-            {
-                if (IPAddress.TryParse(IPTextBox.Text, out var address))
-                {
-                    IPListBox.Items.Add(string.Format("{0}/{1}", address, PrefixComboBox.SelectedItem));
-                }
-                else
-                {
-                    MessageBox.Show(Utils.i18N.Translate("Please enter a correct IP address"), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-            }
+            if (IPAddress.TryParse(IPTextBox.Text, out var address))
+                IPListBox.Items.Add($"{address}/{PrefixComboBox.SelectedItem}");
             else
-            {
-                MessageBox.Show(Utils.i18N.Translate("Please enter an IP"), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
+                MessageBoxX.Show(i18N.Translate("Please enter a correct IP address"));
         }
-
-        private void DeleteButton_Click(object sender, EventArgs e)
+        else
         {
-            if (IPListBox.SelectedIndex != -1)
-            {
-                IPListBox.Items.RemoveAt(IPListBox.SelectedIndex);
-            }
-            else
-            {
-                MessageBox.Show(Utils.i18N.Translate("Please select an IP"), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
+            MessageBoxX.Show(i18N.Translate("Please enter an IP"));
         }
+    }
 
-        private void ControlButton_Click(object sender, EventArgs e)
-        {
-            Global.Settings.BypassIPs.Clear();
-            foreach (var ip in IPListBox.Items)
-            {
-                Global.Settings.BypassIPs.Add(ip as string);
-            }
+    private void DeleteButton_Click(object sender, EventArgs e)
+    {
+        if (IPListBox.SelectedIndex != -1)
+            IPListBox.Items.RemoveAt(IPListBox.SelectedIndex);
+        else
+            MessageBoxX.Show(i18N.Translate("Please select an IP"));
+    }
 
-            Utils.Configuration.Save();
-            MessageBox.Show(Utils.i18N.Translate("Saved"), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-            Close();
-        }
+    private async void ControlButton_Click(object sender, EventArgs e)
+    {
+        Global.Settings.TUNTAP.BypassIPs.Clear();
+        foreach (var ip in IPListBox.Items)
+            Global.Settings.TUNTAP.BypassIPs.Add((string)ip);
+
+        await Configuration.SaveAsync();
+        MessageBoxX.Show(i18N.Translate("Saved"));
+        Close();
     }
 }

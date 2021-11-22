@@ -1,322 +1,255 @@
-﻿using Netch.Forms;
-using System;
-using System.Diagnostics;
-using System.IO;
+﻿using System.Net;
 using System.ServiceProcess;
-using System.Threading;
-using System.Threading.Tasks;
+using Netch.Interfaces;
+using Netch.Models;
+using Netch.Models.Modes;
+using Netch.Models.Modes.ProcessMode;
+using Netch.Servers;
+using Netch.Utils;
+using static Netch.Interops.Redirector;
 
-namespace Netch.Controllers
+namespace Netch.Controllers;
+
+public class NFController : IModeController
 {
-    public class NFController
+    private Server? _server;
+    private Redirector _mode = null!;
+    private RedirectorConfig _rdrConfig = null!;
+
+    private static readonly ServiceController NFService = new("netfilter2");
+
+    private static readonly string SystemDriver = $"{Environment.SystemDirectory}\\drivers\\netfilter2.sys";
+
+    public string Name => "Redirector";
+
+    public ModeFeature Features => ModeFeature.SupportIPv6 | ModeFeature.SupportSocks5Auth;
+
+    public async Task StartAsync(Socks5Server server, Mode mode)
     {
-        /// <summary>
-        ///     流量变动事件
-        /// </summary>
-        public event BandwidthUpdateHandler OnBandwidthUpdated;
+        if (mode is not Redirector processMode)
+            throw new InvalidOperationException();
 
-        /// <summary>
-        ///     流量变动处理器
-        /// </summary>
-        /// <param name="upload">上传</param>
-        /// <param name="download">下载</param>
-        public delegate void BandwidthUpdateHandler(long upload, long download);
+        _server = server;
+        _mode = processMode;
+        _rdrConfig = Global.Settings.Redirector;
 
-        /// <summary>
-        ///     进程实例
-        /// </summary>
-        public Process Instance;
+        CheckDriver();
 
-        /// <summary>
-        ///     当前状态
-        /// </summary>
-        public Models.State State = Models.State.Waiting;
+        Dial(NameList.AIO_FILTERLOOPBACK, _mode.FilterLoopback);
+        Dial(NameList.AIO_FILTERINTRANET, _mode.FilterIntranet);
+        Dial(NameList.AIO_FILTERPARENT, _mode.FilterParent ?? _rdrConfig.HandleOnlyDNS);
+        Dial(NameList.AIO_FILTERICMP, _mode.FilterICMP ?? _rdrConfig.FilterICMP);
+        if (_mode.FilterICMP ?? _rdrConfig.FilterICMP)
+            Dial(NameList.AIO_ICMPING, (_mode.FilterICMP != null ? _mode.ICMPDelay ?? 10 : _rdrConfig.ICMPDelay).ToString());
 
-        // 生成驱动文件路径
-        public string driverPath = string.Format("{0}\\drivers\\netfilter2.sys", Environment.SystemDirectory);
+        Dial(NameList.AIO_FILTERTCP, _mode.FilterTCP ?? _rdrConfig.FilterTCP);
+        Dial(NameList.AIO_FILTERUDP, _mode.FilterUDP ?? _rdrConfig.FilterUDP);
 
-        /// <summary>
-        ///		启动
-        /// </summary>
-        /// <param name="server">服务器</param>
-        /// <param name="mode">模式</param>
-        /// <param name="StopServiceAndRestart">先停止驱动服务再重新启动</param>
-        /// <returns>是否成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode, bool StopServiceAndRestart)
+        // DNS
+        Dial(NameList.AIO_FILTERDNS, _mode.FilterDNS ?? _rdrConfig.FilterDNS);
+        Dial(NameList.AIO_DNSONLY, _mode.HandleOnlyDNS ?? _rdrConfig.HandleOnlyDNS);
+        Dial(NameList.AIO_DNSPROX, _mode.DNSProxy ?? _rdrConfig.DNSProxy);
+        if (_mode.FilterDNS ?? _rdrConfig.FilterDNS)
         {
-            if (!StopServiceAndRestart)
-                MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Starting Redirector")}");
+            var dnsStr = _mode.FilterDNS != null ? _mode.DNSHost : _rdrConfig.DNSHost;
 
-            if (!File.Exists("bin\\Redirector.exe"))
-            {
-                return false;
-            }
+            dnsStr = dnsStr.ValueOrDefault() ?? $"{Constants.DefaultPrimaryDNS}:53";
 
-            // 检查驱动是否存在
-            if (File.Exists(driverPath))
-            {
-                // 生成系统版本
-                var version = $"{Environment.OSVersion.Version.Major.ToString()}.{Environment.OSVersion.Version.Minor.ToString()}";
-                var driverName = "";
+            var dns = IPEndPoint.Parse(dnsStr);
+            if (dns.Port == 0)
+                dns.Port = 53;
 
-                switch (version)
-                {
-                    case "10.0":
-                        driverName = "Win-10.sys";
-                        break;
-                    case "6.3":
-                    case "6.2":
-                        driverName = "Win-8.sys";
-                        break;
-                    case "6.1":
-                    case "6.0":
-                        driverName = "Win-7.sys";
-                        break;
-                    default:
-                        Utils.Logging.Info($"不支持的系统版本：{version}");
-                        return false;
-                }
-
-                // 检查驱动版本号
-                FileVersionInfo SystemfileVerInfo = System.Diagnostics.FileVersionInfo.GetVersionInfo(driverPath);
-                FileVersionInfo BinFileVerInfo = System.Diagnostics.FileVersionInfo.GetVersionInfo(string.Format("bin\\{0}", driverName));
-
-                if (!SystemfileVerInfo.FileVersion.Equals(BinFileVerInfo.FileVersion))
-                {
-                    Utils.Logging.Info("开始更新驱动");
-                    // 需要更新驱动
-                    try
-                    {
-                        var service = new ServiceController("netfilter2");
-                        if (service.Status == ServiceControllerStatus.Running)
-                        {
-                            service.Stop();
-                            service.WaitForStatus(ServiceControllerStatus.Stopped);
-                        }
-                        nfapinet.NFAPI.nf_unRegisterDriver("netfilter2");
-
-                        //删除老驱动
-                        File.Delete(driverPath);
-                        if (!InstallDriver())
-                            return false;
-
-                        Utils.Logging.Info($"驱动更新完毕，当前驱动版本:{BinFileVerInfo.FileVersion}");
-                    }
-                    catch (Exception)
-                    {
-                        Utils.Logging.Info($"更新驱动出错");
-                    }
-
-                }
-
-            }
-            else
-            {
-                if (!InstallDriver())
-                {
-                    return false;
-                }
-            }
-
-            try
-            {
-                // 启动驱动服务
-                var service = new ServiceController("netfilter2");
-                if (service.Status == ServiceControllerStatus.Running && StopServiceAndRestart)
-                {
-                    // 防止其他程序占用 重置 NF 百万连接数限制
-                    service.Stop();
-                    service.WaitForStatus(ServiceControllerStatus.Stopped);
-                    MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Starting netfilter2 Service")}");
-                    service.Start();
-                }
-                else if (service.Status == ServiceControllerStatus.Stopped)
-                {
-                    MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Starting netfilter2 Service")}");
-                    service.Start();
-                }
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info(e.ToString());
-
-                var result = nfapinet.NFAPI.nf_registerDriver("netfilter2");
-                if (result != nfapinet.NF_STATUS.NF_STATUS_SUCCESS)
-                {
-                    Utils.Logging.Info($"注册驱动失败，返回值：{result}");
-                    return false;
-                }
-            }
-
-            var processes = "";
-            foreach (var proc in mode.Rule)
-            {
-                processes += proc;
-                processes += ",";
-            }
-            processes += "NTT.exe";
-
-            Instance = MainController.GetProcess();
-            Instance.StartInfo.FileName = "bin\\Redirector.exe";
-            Instance.StartInfo.Arguments = "";
-
-            if (server.Type != "Socks5")
-            {
-                Instance.StartInfo.Arguments += $"-r 127.0.0.1:{Global.Settings.Socks5LocalPort} -p \"{processes}\"";
-            }
-            else
-            {
-                var result = Utils.DNS.Lookup(server.Hostname);
-                if (result == null)
-                {
-                    Utils.Logging.Info("无法解析服务器 IP 地址");
-                    return false;
-                }
-
-                Instance.StartInfo.Arguments += $"-r {result}:{server.Port} -p \"{processes}\"";
-                if (!string.IsNullOrWhiteSpace(server.Username) && !string.IsNullOrWhiteSpace(server.Password))
-                {
-                    Instance.StartInfo.Arguments += $" -username \"{server.Username}\" -password \"{server.Password}\"";
-                }
-            }
-
-            if (File.Exists("logging\\redirector.log"))
-            {
-                File.Delete("logging\\redirector.log"); 
-            }
-
-            Instance.StartInfo.Arguments += $" -t {Global.Settings.RedirectorTCPPort}";
-            Utils.Logging.Info(Instance.StartInfo.Arguments);
-            Instance.OutputDataReceived += OnOutputDataReceived;
-            Instance.ErrorDataReceived += OnOutputDataReceived;
-            State = Models.State.Starting;
-            Instance.Start();
-            Instance.BeginOutputReadLine();
-            Instance.BeginErrorReadLine();
-
-            for (var i = 0; i < 10; i++)
-            {
-                Thread.Sleep(1000);
-
-                if (State == Models.State.Started)
-                {
-                    return true;
-                }
-            }
-
-            Utils.Logging.Info("NF 进程启动超时");
-            Stop();
-            return false;
+            Dial(NameList.AIO_DNSHOST, dns.Address.ToString());
+            Dial(NameList.AIO_DNSPORT, dns.Port.ToString());
         }
 
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
+        // Server
+        Dial(NameList.AIO_TGTHOST, await server.AutoResolveHostnameAsync());
+        Dial(NameList.AIO_TGTPORT, server.Port.ToString());
+        Dial(NameList.AIO_TGTUSER, server.Username ?? string.Empty);
+        Dial(NameList.AIO_TGTPASS, server.Password ?? string.Empty);
+
+        // Mode Rule
+        DialRule();
+
+        if (!await InitAsync())
+            throw new MessageException("Redirector start failed.");
+    }
+
+    public Task StopAsync()
+    {
+        return FreeAsync();
+    }
+
+    #region CheckRule
+
+    /// <summary>
+    /// </summary>
+    /// <param name="r"></param>
+    /// <param name="clear"></param>
+    /// <returns>No Problem true</returns>
+    private static bool CheckCppRegex(string r, bool clear = true)
+    {
+        try
         {
-            try
-            {
-                if (Instance != null && !Instance.HasExited)
-                {
-                    Instance.Kill();
-                    Instance.WaitForExit();
-                }
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info(e.ToString());
-            }
+            if (r.StartsWith("!"))
+                return Dial(NameList.AIO_ADDNAME, r.Substring(1));
+
+            return Dial(NameList.AIO_ADDNAME, r);
         }
-        public bool InstallDriver()
+        finally
         {
-
-            Utils.Logging.Info("安装驱动中");
-            // 生成系统版本
-            var version = $"{Environment.OSVersion.Version.Major.ToString()}.{Environment.OSVersion.Version.Minor.ToString()}";
-
-            // 检查系统版本并复制对应驱动
-            try
-            {
-                switch (version)
-                {
-                    case "10.0":
-                        File.Copy("bin\\Win-10.sys", driverPath);
-                        Utils.Logging.Info("已复制 Win10 驱动");
-                        break;
-                    case "6.3":
-                    case "6.2":
-                        File.Copy("bin\\Win-8.sys", driverPath);
-                        Utils.Logging.Info("已复制 Win8 驱动");
-                        break;
-                    case "6.1":
-                    case "6.0":
-                        File.Copy("bin\\Win-7.sys", driverPath);
-                        Utils.Logging.Info("已复制 Win7 驱动");
-                        break;
-                    default:
-                        Utils.Logging.Info($"不支持的系统版本：{version}");
-                        return false;
-                }
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info("复制驱动文件失败");
-                Utils.Logging.Info(e.ToString());
-                return false;
-            }
-            MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Register driver")}");
-            // 注册驱动文件
-            var result = nfapinet.NFAPI.nf_registerDriver("netfilter2");
-            if (result != nfapinet.NF_STATUS.NF_STATUS_SUCCESS)
-            {
-                Utils.Logging.Info($"注册驱动失败，返回值：{result}");
-                return false;
-            }
-            return true;
-        }
-
-        public void OnOutputDataReceived(object sender, DataReceivedEventArgs e)
-        {
-            if (!string.IsNullOrWhiteSpace(e.Data))
-            {
-                File.AppendAllText("logging\\redirector.log", string.Format("{0}\r\n", e.Data));
-
-                if (State == Models.State.Starting)
-                {
-                    if (Instance.HasExited)
-                    {
-                        State = Models.State.Stopped;
-                    }
-                    else if (e.Data.Contains("Started"))
-                    {
-                        State = Models.State.Started;
-                    }
-                    else if (e.Data.Contains("Failed") || e.Data.Contains("Unable"))
-                    {
-                        State = Models.State.Stopped;
-                    }
-                }
-                else if (State == Models.State.Started)
-                {
-                    if (e.Data.StartsWith("[APP][Bandwidth]"))
-                    {
-                        var splited = e.Data.Replace("[APP][Bandwidth]", "").Trim().Split(',');
-                        if (splited.Length == 2)
-                        {
-                            var uploadSplited = splited[0].Split(':');
-                            var downloadSplited = splited[1].Split(':');
-
-                            if (uploadSplited.Length == 2 && downloadSplited.Length == 2)
-                            {
-                                if (long.TryParse(uploadSplited[1], out var upload) && long.TryParse(downloadSplited[1], out var download))
-                                {
-                                    Task.Run(() => OnBandwidthUpdated(upload, download));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            if (clear)
+                Dial(NameList.AIO_CLRNAME, "");
         }
     }
+
+    /// <summary>
+    /// </summary>
+    /// <param name="rules"></param>
+    /// <param name="results"></param>
+    /// <returns>No Problem true</returns>
+    public static bool CheckRules(IEnumerable<string> rules, out IEnumerable<string> results)
+    {
+        results = rules.Where(r => !CheckCppRegex(r, false));
+        Dial(NameList.AIO_CLRNAME, "");
+        return !results.Any();
+    }
+
+    public static string GenerateInvalidRulesMessage(IEnumerable<string> rules)
+    {
+        return $"{string.Join("\n", rules)}\n" + i18N.Translate("Above rules does not conform to C++ regular expression syntax");
+    }
+
+    #endregion
+
+    private void DialRule()
+    {
+        Dial(NameList.AIO_CLRNAME, "");
+        var invalidList = new List<string>();
+        foreach (var s in _mode.Bypass)
+        {
+            if (!Dial(NameList.AIO_BYPNAME, s))
+                invalidList.Add(s);
+        }
+
+        foreach (var s in _mode.Handle)
+        {
+            if (!Dial(NameList.AIO_ADDNAME, s))
+                invalidList.Add(s);
+        }
+
+        if (invalidList.Any())
+            throw new MessageException(GenerateInvalidRulesMessage(invalidList));
+
+        // Bypass Self
+        Dial(NameList.AIO_BYPNAME, "^" + Global.NetchDir.ToRegexString());
+    }
+
+    #region DriverUtil
+
+    private static void CheckDriver()
+    {
+        var binFileVersion = Utils.Utils.GetFileVersion(Constants.NFDriver);
+        var systemFileVersion = Utils.Utils.GetFileVersion(SystemDriver);
+
+        Log.Information("Built-in  netfilter2 driver version: {Name}", binFileVersion);
+        Log.Information("Installed netfilter2 driver version: {Name}", systemFileVersion);
+
+        if (!File.Exists(SystemDriver))
+        {
+            // Install
+            InstallDriver();
+            return;
+        }
+
+        var reinstall = false;
+        if (Version.TryParse(binFileVersion, out var binResult) && Version.TryParse(systemFileVersion, out var systemResult))
+        {
+            if (binResult.CompareTo(systemResult) > 0)
+                // Update
+                reinstall = true;
+            else if (systemResult.Major != binResult.Major)
+                // Downgrade when Major version different (may have breaking changes)
+                reinstall = true;
+        }
+        else
+        {
+            // Parse File versionName to Version failed
+            if (!systemFileVersion.Equals(binFileVersion))
+                // versionNames are different, Reinstall
+                reinstall = true;
+        }
+
+        if (!reinstall)
+            return;
+
+        Log.Information("Update netfilter2 driver");
+        UninstallDriver();
+        InstallDriver();
+    }
+
+    /// <summary>
+    ///     安装 NF 驱动
+    /// </summary>
+    /// <returns>驱动是否安装成功</returns>
+    private static void InstallDriver()
+    {
+        Log.Information("Install netfilter2 driver");
+        Global.MainForm.StatusText(i18N.Translate("Installing netfilter2 driver"));
+
+        if (!File.Exists(Constants.NFDriver))
+            throw new MessageException(i18N.Translate("builtin driver files missing, can't install NF driver"));
+
+        try
+        {
+            File.Copy(Constants.NFDriver, SystemDriver);
+        }
+        catch (Exception e)
+        {
+            Log.Error(e, "Copy netfilter2.sys failed\n");
+            throw new MessageException($"Copy netfilter2.sys failed\n{e.Message}");
+        }
+
+        // 注册驱动文件
+        if (Interops.Redirector.aio_register("netfilter2"))
+        {
+            Log.Information("Install netfilter2 driver finished");
+        }
+        else
+        {
+            Log.Error("Register netfilter2 failed");
+        }
+    }
+
+    /// <summary>
+    ///     卸载 NF 驱动
+    /// </summary>
+    /// <returns>是否成功卸载</returns>
+    public static bool UninstallDriver()
+    {
+        Log.Information("Uninstall netfilter2");
+        try
+        {
+            if (NFService.Status == ServiceControllerStatus.Running)
+            {
+                NFService.Stop();
+                NFService.WaitForStatus(ServiceControllerStatus.Stopped);
+            }
+        }
+        catch (Exception)
+        {
+            // ignored
+        }
+
+        if (!File.Exists(SystemDriver))
+            return true;
+
+        Interops.Redirector.aio_unregister("netfilter2");
+        File.Delete(SystemDriver);
+
+        return true;
+    }
+
+    #endregion
 }

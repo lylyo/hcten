@@ -1,3 +1,4 @@
 /bin
 /obj
-/Netch.csproj.user
+/*.csproj.user
+FodyWeavers.xsd

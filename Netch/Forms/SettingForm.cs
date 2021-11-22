@@ -1,440 +1,286 @@
-﻿using Netch.Models.SSD;
-using System;
-using System.Globalization;
-using System.IO;
 using System.Net;
-using System.Text;
-using System.Windows.Forms;
-using TaskScheduler;
+using Netch.Properties;
+using Netch.Utils;
 
-namespace Netch.Forms
+namespace Netch.Forms;
+
+[Fody.ConfigureAwait(true)]
+public partial class SettingForm : BindingForm
 {
-    public partial class SettingForm : Form
+    public SettingForm()
     {
-        public SettingForm()
+        InitializeComponent();
+        Icon = Resources.icon;
+        i18N.TranslateForm(this);
+
+        #region General
+
+        BindTextBox<ushort>(Socks5PortTextBox, p => true, p => Global.Settings.Socks5LocalPort = p, Global.Settings.Socks5LocalPort);
+
+        BindCheckBox(AllowDevicesCheckBox,
+            c => Global.Settings.LocalAddress = AllowDevicesCheckBox.Checked ? "0.0.0.0" : "127.0.0.1",
+            Global.Settings.LocalAddress switch { "127.0.0.1" => false, "0.0.0.0" => true, _ => false });
+
+        BindRadioBox(ICMPingRadioBtn, _ => { }, !Global.Settings.ServerTCPing);
+
+        BindRadioBox(TCPingRadioBtn, c => Global.Settings.ServerTCPing = c, Global.Settings.ServerTCPing);
+
+        BindTextBox<int>(ProfileCountTextBox, i => i > -1, i => Global.Settings.ProfileCount = i, Global.Settings.ProfileCount);
+        BindTextBox<int>(DetectionTickTextBox,
+            i => DelayTestHelper.Range.InRange(i),
+            i => Global.Settings.DetectionTick = i,
+            Global.Settings.DetectionTick);
+
+        BindTextBox<int>(StartedPingIntervalTextBox, _ => true, i => Global.Settings.StartedPingInterval = i, Global.Settings.StartedPingInterval);
+
+        object[]? stuns;
+        try
         {
-            InitializeComponent();
+            stuns = File.ReadLines(Constants.STUNServersFile).Cast<object>().ToArray();
+        }
+        catch (Exception e)
+        {
+            Log.Warning(e, "Load stun.txt failed");
+            stuns = null;
         }
 
-        private void TUNTAPUseCustomDNSCheckBox_CheckedChanged(object sender, EventArgs e)
-        {
-            if (!UseCustomDNSCheckBox.Checked)
+        BindComboBox(STUN_ServerComboBox,
+            s =>
             {
-                TUNTAPDNSTextBox.Enabled = false;
+                var split = s.SplitRemoveEmptyEntriesAndTrimEntries(':');
+                if (!split.Any())
+                    return false;
+
+                var port = split.ElementAtOrDefault(1);
+                if (port != null)
+                    if (!ushort.TryParse(split[1], out _))
+                        return false;
+
+                return true;
+            },
+            o =>
+            {
+                var split = o.ToString().SplitRemoveEmptyEntriesAndTrimEntries(':');
+                Global.Settings.STUN_Server = split[0];
+
+                var port = split.ElementAtOrDefault(1);
+                Global.Settings.STUN_Server_Port = port != null ? ushort.Parse(port) : 3478;
+            },
+            Global.Settings.STUN_Server + ":" + Global.Settings.STUN_Server_Port,
+            stuns);
+
+        BindListComboBox(LanguageComboBox, o => Global.Settings.Language = o.ToString(), i18N.GetTranslateList(), Global.Settings.Language);
+
+        #endregion
+
+        #region Process Mode
+
+        BindCheckBox(FilterTCPCheckBox, b => Global.Settings.Redirector.FilterTCP = b, Global.Settings.Redirector.FilterTCP);
+
+        BindCheckBox(FilterUDPCheckBox, b => Global.Settings.Redirector.FilterUDP = b, Global.Settings.Redirector.FilterUDP);
+
+        BindCheckBox(FilterICMPCheckBox, b => Global.Settings.Redirector.FilterICMP = b, Global.Settings.Redirector.FilterICMP);
+
+        BindTextBox<int>(ICMPDelayTextBox, s => true, s => Global.Settings.Redirector.ICMPDelay = s, Global.Settings.Redirector.ICMPDelay);
+
+        BindCheckBox(FilterDNSCheckBox, b => Global.Settings.Redirector.FilterDNS = b, Global.Settings.Redirector.FilterDNS);
+
+        // TODO validate Redirector AioDNS DNS
+        BindTextBox(DNSHijackHostTextBox, s => true, s => Global.Settings.Redirector.DNSHost = s, Global.Settings.Redirector.DNSHost);
+
+        BindCheckBox(ChildProcessHandleCheckBox, s => Global.Settings.Redirector.FilterParent = s, Global.Settings.Redirector.FilterParent);
+
+        BindCheckBox(DNSProxyCheckBox, b => Global.Settings.Redirector.DNSProxy = b, Global.Settings.Redirector.DNSProxy);
+
+        BindCheckBox(HandleProcDNSCheckBox, b => Global.Settings.Redirector.HandleOnlyDNS = b, Global.Settings.Redirector.HandleOnlyDNS);
+
+        #endregion
+
+        #region TUN/TAP
+
+        BindTextBox(TUNTAPAddressTextBox, s => IPAddress.TryParse(s, out _), s => Global.Settings.TUNTAP.Address = s, Global.Settings.TUNTAP.Address);
+
+        BindTextBox(TUNTAPNetmaskTextBox, s => IPAddress.TryParse(s, out _), s => Global.Settings.TUNTAP.Netmask = s, Global.Settings.TUNTAP.Netmask);
+
+        BindTextBox(TUNTAPGatewayTextBox, s => IPAddress.TryParse(s, out _), s => Global.Settings.TUNTAP.Gateway = s, Global.Settings.TUNTAP.Gateway);
+
+        BindCheckBox(UseCustomDNSCheckBox, b => { Global.Settings.TUNTAP.UseCustomDNS = b; }, Global.Settings.TUNTAP.UseCustomDNS);
+
+        BindTextBox(TUNTAPDNSTextBox,
+            s => IPAddress.TryParse(s, out _),
+            s =>
+            {
+                if (UseCustomDNSCheckBox.Checked)
+                    Global.Settings.TUNTAP.DNS = s;
+            },
+            Global.Settings.TUNTAP.DNS);
+
+        BindCheckBox(ProxyDNSCheckBox, b => Global.Settings.TUNTAP.ProxyDNS = b, Global.Settings.TUNTAP.ProxyDNS);
+
+        #endregion
+
+        #region V2Ray
+
+        BindCheckBox(XrayConeCheckBox, b => Global.Settings.V2RayConfig.XrayCone = b, Global.Settings.V2RayConfig.XrayCone);
+
+        BindCheckBox(TLSAllowInsecureCheckBox, b => Global.Settings.V2RayConfig.AllowInsecure = b, Global.Settings.V2RayConfig.AllowInsecure);
+        BindCheckBox(UseMuxCheckBox, b => Global.Settings.V2RayConfig.UseMux = b, Global.Settings.V2RayConfig.UseMux);
+
+        BindTextBox<int>(mtuTextBox, i => true, i => Global.Settings.V2RayConfig.KcpConfig.mtu = i, Global.Settings.V2RayConfig.KcpConfig.mtu);
+        BindTextBox<int>(ttiTextBox, i => true, i => Global.Settings.V2RayConfig.KcpConfig.tti = i, Global.Settings.V2RayConfig.KcpConfig.tti);
+        BindTextBox<int>(uplinkCapacityTextBox,
+            i => true,
+            i => Global.Settings.V2RayConfig.KcpConfig.uplinkCapacity = i,
+            Global.Settings.V2RayConfig.KcpConfig.uplinkCapacity);
+
+        BindTextBox<int>(downlinkCapacityTextBox,
+            i => true,
+            i => Global.Settings.V2RayConfig.KcpConfig.downlinkCapacity = i,
+            Global.Settings.V2RayConfig.KcpConfig.downlinkCapacity);
+
+        BindTextBox<int>(readBufferSizeTextBox,
+            i => true,
+            i => Global.Settings.V2RayConfig.KcpConfig.readBufferSize = i,
+            Global.Settings.V2RayConfig.KcpConfig.readBufferSize);
+
+        BindTextBox<int>(writeBufferSizeTextBox,
+            i => true,
+            i => Global.Settings.V2RayConfig.KcpConfig.writeBufferSize = i,
+            Global.Settings.V2RayConfig.KcpConfig.writeBufferSize);
+
+        BindCheckBox(congestionCheckBox, b => Global.Settings.V2RayConfig.KcpConfig.congestion = b, Global.Settings.V2RayConfig.KcpConfig.congestion);
+
+        #endregion
+
+        #region Others
+
+        BindCheckBox(ExitWhenClosedCheckBox, b => Global.Settings.ExitWhenClosed = b, Global.Settings.ExitWhenClosed);
+
+        BindCheckBox(StopWhenExitedCheckBox, b => Global.Settings.StopWhenExited = b, Global.Settings.StopWhenExited);
+
+        BindCheckBox(StartWhenOpenedCheckBox, b => Global.Settings.StartWhenOpened = b, Global.Settings.StartWhenOpened);
+
+        BindCheckBox(MinimizeWhenStartedCheckBox, b => Global.Settings.MinimizeWhenStarted = b, Global.Settings.MinimizeWhenStarted);
+
+        BindCheckBox(RunAtStartupCheckBox, b => Global.Settings.RunAtStartup = b, Global.Settings.RunAtStartup);
+
+        BindCheckBox(CheckUpdateWhenOpenedCheckBox, b => Global.Settings.CheckUpdateWhenOpened = b, Global.Settings.CheckUpdateWhenOpened);
+
+        BindCheckBox(CheckBetaUpdateCheckBox, b => Global.Settings.CheckBetaUpdate = b, Global.Settings.CheckBetaUpdate);
+
+        BindCheckBox(UpdateServersWhenOpenedCheckBox, b => Global.Settings.UpdateServersWhenOpened = b, Global.Settings.UpdateServersWhenOpened);
+
+        BindCheckBox(NoSupportDialogCheckBox, b => Global.Settings.NoSupportDialog = b, Global.Settings.NoSupportDialog);
+
+        #endregion
+
+        #region AioDNS
+
+        BindTextBox(ChinaDNSTextBox, _ => true, s => Global.Settings.AioDNS.ChinaDNS = s, Global.Settings.AioDNS.ChinaDNS);
+
+        BindTextBox(OtherDNSTextBox, _ => true, s => Global.Settings.AioDNS.OtherDNS = s, Global.Settings.AioDNS.OtherDNS);
+
+        BindTextBox(AioDNSListenPortTextBox,
+            s => ushort.TryParse(s, out _),
+            s => Global.Settings.AioDNS.ListenPort = ushort.Parse(s),
+            Global.Settings.AioDNS.ListenPort);
+
+        #endregion
+    }
+
+    private void SettingForm_Load(object sender, EventArgs e)
+    {
+        TUNTAPUseCustomDNSCheckBox_CheckedChanged(null, null);
+    }
+
+    protected override void BindTextBox<T>(TextBoxBase control, Func<T, bool> check, Action<T> save, object value)
+    {
+        base.BindTextBox(control, check, save, value);
+        control.TextChanged += (_, _) =>
+        {
+            if (Validate(control))
+            {
+                errorProvider.SetError(control, null);
             }
             else
             {
-                TUNTAPDNSTextBox.Enabled = true;
+                errorProvider.SetError(control, i18N.Translate("Invalid value"));
             }
+        };
+    }
 
-            if (Global.Settings.TUNTAP.DNS.Count > 0)
-            {
-                var dns = "";
-                foreach (var ip in Global.Settings.TUNTAP.DNS)
-                {
-                    dns += ip;
-                    dns += ',';
-                }
-                dns = dns.Trim();
-                TUNTAPDNSTextBox.Text = dns.Substring(0, dns.Length - 1);
-            }
-            // 如果 DNS 为空，设置为默认 DNS 1.1.1.1
-            else
-            {
-                Global.Settings.TUNTAP.DNS.Add("1.1.1.1");
-                TUNTAPDNSTextBox.Text = "1.1.1.1";
-            }
-        }
+    protected new void BindComboBox(ComboBox control, Func<string, bool> check, Action<string> save, string value, object[]? values = null)
+    {
+        base.BindComboBox(control, check, save, value, values);
 
-        private void SettingForm_Load(object sender, EventArgs e)
+        control.TextChanged += (_, _) =>
         {
-            Text = Utils.i18N.Translate(Text);
-            PortGroupBox.Text = Utils.i18N.Translate(PortGroupBox.Text);
-            AllowDevicesCheckBox.Text = Utils.i18N.Translate(AllowDevicesCheckBox.Text);
-            TUNTAPAddressLabel.Text = Utils.i18N.Translate(TUNTAPAddressLabel.Text);
-            TUNTAPNetmaskLabel.Text = Utils.i18N.Translate(TUNTAPNetmaskLabel.Text);
-            TUNTAPGatewayLabel.Text = Utils.i18N.Translate(TUNTAPGatewayLabel.Text);
-            UseCustomDNSCheckBox.Text = Utils.i18N.Translate(UseCustomDNSCheckBox.Text);
-            ProxyDNSCheckBox.Text = Utils.i18N.Translate(ProxyDNSCheckBox.Text);
-            UseFakeDNSCheckBox.Text = Utils.i18N.Translate(UseFakeDNSCheckBox.Text);
-            GlobalBypassIPsButton.Text = Utils.i18N.Translate(GlobalBypassIPsButton.Text);
-            ControlButton.Text = Utils.i18N.Translate(ControlButton.Text);
-            BootShadowsocksFromDLLCheckBox.Text = Utils.i18N.Translate(BootShadowsocksFromDLLCheckBox.Text);
-
-            ExitWhenClosedCheckBox.Checked = Global.Settings.ExitWhenClosed;
-            StopWhenExitedCheckBox.Checked = Global.Settings.StopWhenExited;
-            StartWhenOpenedCheckBox.Checked = Global.Settings.StartWhenOpened;
-            CheckUpdateWhenOpenedCheckBox.Checked = Global.Settings.CheckUpdateWhenOpened;
-            MinimizeWhenStartedCheckBox.Checked = Global.Settings.MinimizeWhenStarted;
-            RunAtStartup.Checked = Global.Settings.RunAtStartup;
-            EnableStartedTcping_CheckBox.Checked = Global.Settings.StartedTcping;
-            DetectionInterval_TextBox.Text = Global.Settings.StartedTcping_Interval.ToString();
-            BootShadowsocksFromDLLCheckBox.Checked = Global.Settings.BootShadowsocksFromDLL;
-
-            Socks5PortTextBox.Text = Global.Settings.Socks5LocalPort.ToString();
-            HTTPPortTextBox.Text = Global.Settings.HTTPLocalPort.ToString();
-            RedirectorTextBox.Text = Global.Settings.RedirectorTCPPort.ToString();
-
-            TUNTAPAddressTextBox.Text = Global.Settings.TUNTAP.Address;
-            TUNTAPNetmaskTextBox.Text = Global.Settings.TUNTAP.Netmask;
-            TUNTAPGatewayTextBox.Text = Global.Settings.TUNTAP.Gateway;
-
-            UseCustomDNSCheckBox.Checked = Global.Settings.TUNTAP.UseCustomDNS;
-            ProxyDNSCheckBox.Checked = Global.Settings.TUNTAP.ProxyDNS;
-            UseFakeDNSCheckBox.Checked = Global.Settings.TUNTAP.UseFakeDNS;
-
-            BehaviorGroupBox.Text = Utils.i18N.Translate(BehaviorGroupBox.Text);
-            ExitWhenClosedCheckBox.Text = Utils.i18N.Translate(ExitWhenClosedCheckBox.Text);
-            StopWhenExitedCheckBox.Text = Utils.i18N.Translate(StopWhenExitedCheckBox.Text);
-            StartWhenOpenedCheckBox.Text = Utils.i18N.Translate(StartWhenOpenedCheckBox.Text);
-            MinimizeWhenStartedCheckBox.Text = Utils.i18N.Translate(MinimizeWhenStartedCheckBox.Text);
-            RunAtStartup.Text = Utils.i18N.Translate(RunAtStartup.Text);
-            CheckUpdateWhenOpenedCheckBox.Text = Utils.i18N.Translate(CheckUpdateWhenOpenedCheckBox.Text);
-            ProfileCount_Label.Text = Utils.i18N.Translate(ProfileCount_Label.Text);
-            DelayTestAfterStartup_Label.Text = Utils.i18N.Translate(DelayTestAfterStartup_Label.Text);
-            EnableStartedTcping_CheckBox.Text = Utils.i18N.Translate(EnableStartedTcping_CheckBox.Text);
-            DetectionInterval_Label.Text = Utils.i18N.Translate(DetectionInterval_Label.Text);
-            DelayTestAfterStartup_Label.Text = Utils.i18N.Translate(DelayTestAfterStartup_Label.Text);
-            STUNServerLabel.Text = Utils.i18N.Translate(STUNServerLabel.Text);
-            STUNServerPortLabel.Text = Utils.i18N.Translate(STUNServerPortLabel.Text);
-
-            ProfileCount_TextBox.Text = Global.Settings.ProfileCount.ToString();
-            STUN_ServerTextBox.Text = Global.Settings.STUN_Server.ToString();
-            STUN_ServerPortTextBox.Text = Global.Settings.STUN_Server_Port.ToString();
-
-            AclLabel.Text = Utils.i18N.Translate(AclLabel.Text);
-            AclAddr.Text = Global.Settings.ACL.ToString();
-
-            LanguageLabel.Text = Utils.i18N.Translate(LanguageLabel.Text);
-            LanguageComboBox.Items.AddRange(Utils.i18N.GetTranslateList().ToArray());
-            LanguageComboBox.SelectedItem = Global.Settings.Language;
-
-            if (Global.Settings.TUNTAP.DNS.Count > 0)
+            if (Validate(control))
             {
-                var dns = "";
-                foreach (var ip in Global.Settings.TUNTAP.DNS)
-                {
-                    dns += ip;
-                    dns += ',';
-                }
-                dns = dns.Trim();
-                TUNTAPDNSTextBox.Text = dns.Substring(0, dns.Length - 1);
-            }
-            // 如果 DNS 为空，设置为默认 DNS 1.1.1.1
-            else
-            {
-                Global.Settings.TUNTAP.DNS.Add("1.1.1.1");
-                TUNTAPDNSTextBox.Text = "1.1.1.1";
-            }
-
-            if (!UseCustomDNSCheckBox.Checked)
-            {
-                TUNTAPDNSTextBox.Enabled = false;
-            }
-
-            // 设置本地代理是否允许其他设备连接
-            if (Global.Settings.LocalAddress == "127.0.0.1")
-            {
-                AllowDevicesCheckBox.Checked = false;
-            }
-            else if (Global.Settings.LocalAddress == "0.0.0.0")
-            {
-                AllowDevicesCheckBox.Checked = true;
+                errorProvider.SetError(control, null);
             }
             else
             {
-                Global.Settings.LocalAddress = "127.0.0.1";
-                AllowDevicesCheckBox.Checked = false;
+                errorProvider.SetError(control, i18N.Translate("Invalid value"));
             }
-        }
+        };
+    }
 
-        private void SettingForm_FormClosing(object sender, FormClosingEventArgs e)
+    private void TUNTAPUseCustomDNSCheckBox_CheckedChanged(object? sender, EventArgs? e)
+    {
+        if (UseCustomDNSCheckBox.Checked)
+            TUNTAPDNSTextBox.Text = Global.Settings.TUNTAP.DNS;
+        else
+            TUNTAPDNSTextBox.Text = "AioDNS";
+    }
+
+    private void GlobalBypassIPsButton_Click(object sender, EventArgs e)
+    {
+        Hide();
+        new GlobalBypassIPForm().ShowDialog();
+        Show();
+    }
+
+    private async void ControlButton_Click(object sender, EventArgs e)
+    {
+        Utils.Utils.ComponentIterator(this, component => Utils.Utils.ChangeControlForeColor(component, Color.Black));
+
+        #region Check
+
+        var checkNotPassControl = GetInvalidateValueControls();
+
+        if (checkNotPassControl.Any())
         {
-            Global.MainForm.Show();
+            var failControl = checkNotPassControl.First();
+
+            // switch to fail control's tab page
+            var p = failControl.Parent;
+            while (p != null)
+            {
+                if (p is TabPage tabPage)
+                {
+                    TabControl.SelectedTab = tabPage;
+                    break;
+                }
+
+                p = p.Parent;
+            }
+
+            return;
         }
 
-        private void GlobalBypassIPsButton_Click(object sender, EventArgs e)
-        {
-            new GlobalBypassIPForm().Show();
-            Hide();
-        }
+        #endregion
 
-        private void ControlButton_Click(object sender, EventArgs e)
-        {
-            Global.Settings.ExitWhenClosed = ExitWhenClosedCheckBox.Checked;
-            Global.Settings.StopWhenExited = StopWhenExitedCheckBox.Checked;
-            Global.Settings.StartWhenOpened = StartWhenOpenedCheckBox.Checked;
-            Global.Settings.CheckUpdateWhenOpened = CheckUpdateWhenOpenedCheckBox.Checked;
-            Global.Settings.MinimizeWhenStarted = MinimizeWhenStartedCheckBox.Checked;
-            Global.Settings.RunAtStartup = RunAtStartup.Checked;
-            Global.Settings.BootShadowsocksFromDLL = BootShadowsocksFromDLLCheckBox.Checked;
-            Global.Settings.Language = LanguageComboBox.SelectedItem.ToString();
+        #region Save
 
-            // 加载系统语言
-            if (Global.Settings.Language.Equals("System"))
-            {
-                // 得到当前线程语言代码
-                var culture = CultureInfo.CurrentCulture.Name;
+        SaveBinds();
 
-                // 尝试加载内置中文语言
-                if (culture == "zh-CN")
-                {
-                    // 加载语言
-                    Utils.i18N.Load(Encoding.UTF8.GetString(Properties.Resources.zh_CN));
-                }
+        #endregion
 
-                // 从外置文件中加载语言
-                if (File.Exists($"i18n\\{culture}"))
-                {
-                    // 加载语言
-                    Utils.i18N.Load(File.ReadAllText($"i18n\\{culture}"));
-                }
-            }
+        Utils.Utils.RegisterNetchStartupItem();
 
-            if (Global.Settings.Language.Equals("zh-CN"))
-            {
-                // 加载内置中文
-                Utils.i18N.Load(Encoding.UTF8.GetString(Properties.Resources.zh_CN));
-            }
-            else if (Global.Settings.Language.Equals("en-US"))
-            {
-                // 加载内置英文
-                Utils.i18N.Load(Global.Settings.Language);
-            }
-            else if (File.Exists($"i18n\\{Global.Settings.Language}"))
-            {
-                // 从外置文件中加载语言
-                Utils.i18N.Load(File.ReadAllText($"i18n\\{Global.Settings.Language}"));
-            }
-
-            // 开机自启判断
-            TaskSchedulerClass scheduler = new TaskSchedulerClass();
-            scheduler.Connect(null, null, null, null);
-            ITaskFolder folder = scheduler.GetFolder("\\");
-            bool taskIsExists = false;
-            try
-            {
-                folder.GetTask("Netch Startup");
-                taskIsExists = true;
-            }
-            catch (Exception) { }
-
-            if (RunAtStartup.Checked)
-            {
-                if (taskIsExists)
-                    folder.DeleteTask("Netch Startup", 0);
-
-                ITaskDefinition task = scheduler.NewTask(0);
-                task.RegistrationInfo.Author = "Netch";
-                task.RegistrationInfo.Description = "Netch run at startup.";
-                task.Principal.RunLevel = _TASK_RUNLEVEL.TASK_RUNLEVEL_HIGHEST;
-
-                task.Triggers.Create(_TASK_TRIGGER_TYPE2.TASK_TRIGGER_LOGON);
-                IExecAction action = (IExecAction)task.Actions.Create(_TASK_ACTION_TYPE.TASK_ACTION_EXEC);
-                action.Path = System.Windows.Forms.Application.ExecutablePath;
-
-
-                task.Settings.ExecutionTimeLimit = "PT0S";
-                task.Settings.DisallowStartIfOnBatteries = false;
-                task.Settings.RunOnlyIfIdle = false;
-
-                folder.RegisterTaskDefinition("Netch Startup", task, (int)_TASK_CREATION.TASK_CREATE, null, null, _TASK_LOGON_TYPE.TASK_LOGON_INTERACTIVE_TOKEN, "");
-            }
-            else
-            {
-                if (taskIsExists)
-                    folder.DeleteTask("Netch Startup", 0);
-            }
-
-            try
-            {
-                var Socks5Port = int.Parse(Socks5PortTextBox.Text);
-
-                if (Socks5Port > 0 && Socks5Port < 65536)
-                {
-                    Global.Settings.Socks5LocalPort = Socks5Port;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                Socks5PortTextBox.Text = Global.Settings.Socks5LocalPort.ToString();
-                MessageBox.Show(Utils.i18N.Translate("Port value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-
-            try
-            {
-                var HTTPPort = int.Parse(HTTPPortTextBox.Text);
-
-                if (HTTPPort > 0 && HTTPPort < 65536)
-                {
-                    Global.Settings.HTTPLocalPort = HTTPPort;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                HTTPPortTextBox.Text = Global.Settings.HTTPLocalPort.ToString();
-                MessageBox.Show(Utils.i18N.Translate("Port value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-
-            try
-            {
-                var RedirectorPort = int.Parse(RedirectorTextBox.Text);
-
-                if (RedirectorPort > 0 && RedirectorPort < 65536)
-                {
-                    Global.Settings.RedirectorTCPPort = RedirectorPort;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                RedirectorTextBox.Text = Global.Settings.RedirectorTCPPort.ToString();
-                MessageBox.Show(Utils.i18N.Translate("Port value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-
-            if (AllowDevicesCheckBox.Checked)
-            {
-                Global.Settings.LocalAddress = "0.0.0.0";
-            }
-            else
-            {
-                Global.Settings.LocalAddress = "127.0.0.1";
-            }
-
-            try
-            {
-                var Address = IPAddress.Parse(TUNTAPAddressTextBox.Text);
-                var Netmask = IPAddress.Parse(TUNTAPNetmaskTextBox.Text);
-                var Gateway = IPAddress.Parse(TUNTAPGatewayTextBox.Text);
-
-                var DNS = new System.Collections.Generic.List<IPAddress>();
-                foreach (var ip in TUNTAPDNSTextBox.Text.Split(','))
-                {
-                    DNS.Add(IPAddress.Parse(ip));
-                }
-            }
-            catch (FormatException)
-            {
-                MessageBox.Show(Utils.i18N.Translate("IP address format illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                TUNTAPAddressTextBox.Text = Global.Settings.TUNTAP.Address;
-                TUNTAPNetmaskTextBox.Text = Global.Settings.TUNTAP.Netmask;
-                TUNTAPGatewayTextBox.Text = Global.Settings.TUNTAP.Gateway;
-
-                var DNS = "";
-                foreach (var ip in Global.Settings.TUNTAP.DNS)
-                {
-                    DNS += ip;
-                    DNS += ',';
-                }
-                DNS = DNS.Trim();
-                TUNTAPDNSTextBox.Text = DNS.Substring(0, DNS.Length - 1);
-                UseCustomDNSCheckBox.Checked = Global.Settings.TUNTAP.UseCustomDNS;
-
-                return;
-            }
-            try
-            {
-                var ProfileCount = int.Parse(ProfileCount_TextBox.Text);
-
-                if (ProfileCount > -1)
-                {
-                    Global.Settings.ProfileCount = ProfileCount;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                ProfileCount_TextBox.Text = Global.Settings.ProfileCount.ToString();
-                MessageBox.Show(Utils.i18N.Translate("ProfileCount value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-            try
-            {
-                var STUN_Server = STUN_ServerTextBox.Text;
-                Global.Settings.STUN_Server = STUN_Server;
-
-                var STUN_ServerPort = int.Parse(STUN_ServerPortTextBox.Text);
-
-                if (STUN_ServerPort > 0)
-                {
-                    Global.Settings.STUN_Server_Port = STUN_ServerPort;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                ProfileCount_TextBox.Text = Global.Settings.ProfileCount.ToString();
-                MessageBox.Show(Utils.i18N.Translate("STUN_ServerPort value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-            try
-            {
-                Global.Settings.StartedTcping = EnableStartedTcping_CheckBox.Checked;
-
-                var DetectionInterval = int.Parse(DetectionInterval_TextBox.Text);
-
-                if (DetectionInterval > 0)
-                {
-                    Global.Settings.StartedTcping_Interval = DetectionInterval;
-                }
-                else
-                {
-                    throw new FormatException();
-                }
-            }
-            catch (FormatException)
-            {
-                ProfileCount_TextBox.Text = Global.Settings.ProfileCount.ToString();
-                MessageBox.Show(Utils.i18N.Translate("Detection interval value illegal. Try again."), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                return;
-            }
-
-            Global.Settings.ACL = AclAddr.Text;
-
-            Global.Settings.TUNTAP.Address = TUNTAPAddressTextBox.Text;
-            Global.Settings.TUNTAP.Netmask = TUNTAPNetmaskTextBox.Text;
-            Global.Settings.TUNTAP.Gateway = TUNTAPGatewayTextBox.Text;
-
-            Global.Settings.TUNTAP.DNS.Clear();
-            foreach (var ip in TUNTAPDNSTextBox.Text.Split(','))
-            {
-                Global.Settings.TUNTAP.DNS.Add(ip);
-            }
-
-            Global.Settings.TUNTAP.UseCustomDNS = UseCustomDNSCheckBox.Checked;
-            Global.Settings.TUNTAP.ProxyDNS = ProxyDNSCheckBox.Checked;
-            Global.Settings.TUNTAP.UseFakeDNS = UseFakeDNSCheckBox.Checked;
-
-            Utils.Configuration.Save();
-            MessageBox.Show(Utils.i18N.Translate("Saved"), Utils.i18N.Translate("Information"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-            Close();
-        }
+        await Configuration.SaveAsync();
+        MessageBoxX.Show(i18N.Translate("Saved"));
+        Close();
     }
 }

@@ -1,28 +1,30 @@
-﻿namespace Netch.Models
+﻿using Netch.Models.Modes;
+
+namespace Netch.Models;
+
+public class Profile
 {
-    public class Profile
+    public int Index { get; set; }
+
+    public string ModeRemark { get; set; }
+
+    public string ProfileName { get; set; }
+
+    public string ServerRemark { get; set; }
+
+    public Profile(Server server, Mode mode, string name, int index)
     {
-        public string ServerRemark;
-        public string ModeRemark;
-        public string ProfileName;
+        ServerRemark = server.Remark;
+        ModeRemark = mode.i18NRemark;
+        ProfileName = name;
+        Index = index;
+    }
 
-        public bool IsDummy = true;
-
-        public Profile(Server server, Mode mode, string name)
-        {
-            ServerRemark = server.Remark;
-            ModeRemark = mode.Remark;
-            ProfileName = name;
-            IsDummy = false;
-        }
-
-        /// <summary>
-        /// Return a dummy one.
-        /// </summary>
-        public Profile()
-        {
-        }
-
-
+    public Profile()
+    {
+        ServerRemark = string.Empty;
+        ModeRemark = string.Empty;
+        ProfileName = string.Empty;
+        Index = 0;
     }
 }

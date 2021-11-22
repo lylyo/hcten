@@ -1,41 +1,34 @@
-﻿using System;
-using System.Diagnostics;
-using System.Windows.Forms;
+﻿using Netch.Properties;
+using Netch.Utils;
 
-namespace Netch.Forms
+namespace Netch.Forms;
+
+[Fody.ConfigureAwait(true)]
+public partial class AboutForm : Form
 {
-    public partial class AboutForm : Form
+    public AboutForm()
     {
-        public AboutForm()
-        {
-            InitializeComponent();
-        }
+        InitializeComponent();
+        Icon = Resources.icon;
+    }
 
-        private void AboutForm_Load(object sender, EventArgs e)
-        {
-            Text = Utils.i18N.Translate(Text);
-            ChannelLabel.Text = Utils.i18N.Translate(ChannelLabel.Text);
-            SponsorGroupBox.Text = Utils.i18N.Translate(SponsorGroupBox.Text);
-        }
+    private void AboutForm_Load(object sender, EventArgs e)
+    {
+        i18N.TranslateForm(this);
+    }
 
-        private void AboutForm_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            Global.MainForm.Show();
-        }
+    private void NetchPictureBox_Click(object sender, EventArgs e)
+    {
+        Utils.Utils.Open("https://github.com/NetchX/Netch");
+    }
 
-        private void NetchPictureBox_Click(object sender, EventArgs e)
-        {
-            Process.Start("https://github.com/NetchX/Netch");
-        }
+    private void ChannelLabel_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+    {
+        Utils.Utils.Open("https://t.me/Netch");
+    }
 
-        private void ChannelLabel_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
-        {
-            Process.Start("https://t.me/Netch");
-        }
-
-        private void SponsorPictureBox_Click(object sender, EventArgs e)
-        {
-            Process.Start("https://www.mansora.co");
-        }
+    private void SponsorPictureBox_Click(object sender, EventArgs e)
+    {
+        Utils.Utils.Open("https://www.mansora.co");
     }
 }

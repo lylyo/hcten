@@ -1,283 +1,196 @@
-﻿using Netch.Forms;
-using System;
 using System.Diagnostics;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Threading.Tasks;
+using Microsoft.VisualStudio.Threading;
+using Netch.Interfaces;
+using Netch.Models;
+using Netch.Models.Modes;
+using Netch.Servers;
+using Netch.Services;
+using Netch.Utils;
 
-namespace Netch.Controllers
+namespace Netch.Controllers;
+
+public static class MainController
 {
-    public class MainController
+    public static Socks5Server? Socks5Server { get; private set; }
+
+    public static Server? Server { get; private set; }
+
+    public static Mode? Mode { get; private set; }
+
+    public static IServerController? ServerController { get; private set; }
+
+    public static IModeController? ModeController { get; private set; }
+
+    private static readonly AsyncSemaphore Lock = new(1);
+
+    public static async Task StartAsync(Server server, Mode mode)
     {
-        [DllImport("dnsapi", EntryPoint = "DnsFlushResolverCache")]
-        public static extern UInt32 FlushDNSResolverCache();
-        public static Process GetProcess()
-        {
-            var process = new Process();
-            process.StartInfo.WorkingDirectory = string.Format("{0}\\bin", Directory.GetCurrentDirectory());
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.StartInfo.RedirectStandardInput = true;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.UseShellExecute = false;
-            process.EnableRaisingEvents = true;
+        using var releaser = await Lock.EnterAsync();
 
-            return process;
+        Log.Information("Start MainController: {Server} {Mode}", $"{server.Type}", $"[{(int)mode.Type}]{mode.i18NRemark}");
+
+        if (await DnsUtils.LookupAsync(server.Hostname) == null)
+            throw new MessageException(i18N.Translate("Lookup Server hostname failed"));
+
+        // TODO Disable NAT Type Test setting
+        // cache STUN Server ip to prevent "Wrong STUN Server"
+        DnsUtils.LookupAsync(Global.Settings.STUN_Server).Forget();
+
+        Server = server;
+        Mode = mode;
+
+        await Task.WhenAll(Task.Run(NativeMethods.RefreshDNSCache), Task.Run(Firewall.AddNetchFwRules));
+
+        try
+        {
+            ModeController = ModeService.GetModeControllerByType(mode.Type, out var modePort, out var portName);
+
+            if (modePort != null)
+                TryReleaseTcpPort((ushort)modePort, portName);
+
+            if (Server is Socks5Server socks5 && (!socks5.Auth() || ModeController.Features.HasFlag(ModeFeature.SupportSocks5Auth)))
+            {
+                Socks5Server = socks5;
+            }
+            else
+            {
+                // Start Server Controller to get a local socks5 server
+                Log.Debug("Server Information: {Data}", $"{server.Type} {server.MaskedData()}");
+
+                ServerController = ServerHelper.GetUtilByTypeName(server.Type).GetController();
+                Global.MainForm.StatusText(i18N.TranslateFormat("Starting {0}", ServerController.Name));
+
+                TryReleaseTcpPort(ServerController.Socks5LocalPort(), "Socks5");
+                Socks5Server = await ServerController.StartAsync(server);
+
+                StatusPortInfoText.Socks5Port = Socks5Server.Port;
+                StatusPortInfoText.UpdateShareLan();
+            }
+
+            // Start Mode Controller
+            Global.MainForm.StatusText(i18N.TranslateFormat("Starting {0}", ModeController.Name));
+
+            await ModeController.StartAsync(Socks5Server, mode);
+        }
+        catch (Exception e)
+        {
+            releaser.Dispose();
+            await StopAsync();
+
+            switch (e)
+            {
+                case DllNotFoundException:
+                case FileNotFoundException:
+                    throw new Exception(e.Message + "\n\n" + i18N.Translate("Missing File or runtime components"));
+                case MessageException:
+                    throw;
+                default:
+                    Log.Error(e, "Unhandled Exception When Start MainController");
+                    Utils.Utils.Open(Constants.LogFile);
+                    throw new MessageException($"{i18N.Translate("Unhandled Exception")}\n{e.Message}");
+            }
+        }
+    }
+
+    public static async Task StopAsync()
+    {
+        if (Lock.CurrentCount == 0)
+        {
+            (await Lock.EnterAsync()).Dispose();
+            if (ServerController == null && ModeController == null)
+                // stopped
+                return;
+
+            // else begin stop
         }
 
-        /// <summary>
-        ///		SS 控制器
-        /// </summary>
-        public SSController pSSController;
+        using var _ = await Lock.EnterAsync();
 
-        /// <summary>
-        ///     SSR 控制器
-        /// </summary>
-        public SSRController pSSRController;
+        if (ServerController == null && ModeController == null)
+            return;
 
-        /// <summary>
-        ///     V2Ray 控制器
-        /// </summary>
-        public VMessController pVMessController;
+        Log.Information("Stop Main Controller");
+        StatusPortInfoText.Reset();
 
-        /// <summary>
-        ///     Trojan 控制器
-        /// </summary>
-        public TrojanController pTrojanController;
-
-        /// <summary>
-        ///		NF 控制器
-        /// </summary>
-        public NFController pNFController;
-
-        /// <summary>
-        ///     HTTP 控制器
-        /// </summary>
-        public HTTPController pHTTPController;
-
-
-        /// <summary>
-        ///     TUN/TAP 控制器
-        /// </summary>
-        public TUNTAPController pTUNTAPController;
-
-        /// <summary>
-        ///		NTT 控制器
-        /// </summary>
-        public NTTController pNTTController;
-
-        /// <summary>
-        ///		启动
-        /// </summary>
-        /// <param name="server">服务器</param>
-        /// <param name="mode">模式</param>
-        /// <returns>是否启动成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode)
+        var tasks = new[]
         {
-            FlushDNSResolverCache();
+            ServerController?.StopAsync() ?? Task.CompletedTask,
+            ModeController?.StopAsync() ?? Task.CompletedTask
+        };
 
-            var result = false;
-            switch (server.Type)
-            {
-                case "Socks5":
-                    if (mode.Type == 4)
-                    {
-                        result = false;
-                    }
-                    else
-                    {
-                        result = true;
-                    }
-                    break;
-                case "SS":
-                    KillProcess("Shadowsocks");
-                    if (pSSController == null)
-                    {
-                        pSSController = new SSController();
-                    }
-                    result = pSSController.Start(server, mode);
-                    break;
-                case "SSR":
-                    KillProcess("ShadowsocksR");
-                    if (pSSRController == null)
-                    {
-                        pSSRController = new SSRController();
-                    }
-                    result = pSSRController.Start(server, mode);
-                    break;
-                case "VMess":
-                    KillProcess("v2ray");
-                    if (pVMessController == null)
-                    {
-                        pVMessController = new VMessController();
-                    }
-                    result = pVMessController.Start(server, mode);
-                    break;
-                case "Trojan":
-                    KillProcess("Trojan");
-                    if (pTrojanController == null)
-                    {
-                        pTrojanController = new TrojanController();
-                    }
-                    result = pTrojanController.Start(server, mode);
-                    break;
-            }
-
-            if (result)
-            {
-                if (mode.Type == 0)
-                {
-                    if (pNFController == null)
-                    {
-                        pNFController = new NFController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // 进程代理模式，启动 NF 控制器
-                    result = pNFController.Start(server, mode, false);
-                    if (!result)
-                    {
-                        MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Restarting Redirector")}");
-                        Utils.Logging.Info("正常启动失败后尝试停止驱动服务再重新启动");
-                        //正常启动失败后尝试停止驱动服务再重新启动
-                        result = pNFController.Start(server, mode, true);
-                    }
-                    else
-                    {
-                        Task.Run(() => pNTTController.Start());
-                    }
-                }
-                else if (mode.Type == 1)
-                {
-                    if (pTUNTAPController == null)
-                    {
-                        pTUNTAPController = new TUNTAPController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // TUN/TAP 黑名单代理模式，启动 TUN/TAP 控制器
-                    result = pTUNTAPController.Start(server, mode);
-                    if (result)
-                    {
-                        Task.Run(() => pNTTController.Start());
-                    }
-                }
-                else if (mode.Type == 2)
-                {
-                    if (pTUNTAPController == null)
-                    {
-                        pTUNTAPController = new TUNTAPController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // TUN/TAP 白名单代理模式，启动 TUN/TAP 控制器
-                    result = pTUNTAPController.Start(server, mode);
-                    if (result)
-                    {
-                        Task.Run(() => pNTTController.Start());
-                    }
-                }
-                else if (mode.Type == 3 || mode.Type == 5)
-                {
-                    if (pHTTPController == null)
-                    {
-                        pHTTPController = new HTTPController();
-                    }
-                    // HTTP 系统代理和 Socks5 和 HTTP 代理模式，启动 HTTP 控制器
-                    result = pHTTPController.Start(server, mode);
-                }
-                else if (mode.Type == 4)
-                {
-                    // Socks5 代理模式，不需要启动额外的控制器
-                }
-                else
-                {
-                    result = false;
-                }
-            }
-
-            if (!result)
-            {
-                Stop();
-            }
-
-            return result;
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (Exception e)
+        {
+            Log.Error(e, "MainController Stop Error");
         }
 
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
+        ServerController = null;
+        ModeController = null;
+    }
+
+    public static void PortCheck(ushort port, string portName, PortType portType = PortType.Both)
+    {
+        try
         {
-            if (pSSController != null)
-            {
-                pSSController.Stop();
-            }
-            else if (pSSRController != null)
-            {
-                pSSRController.Stop();
-            }
-            else if (pVMessController != null)
-            {
-                pVMessController.Stop();
-            }
-            else if (pTrojanController != null)
-            {
-                pTrojanController.Stop();
-            }
+            PortHelper.CheckPort(port, portType);
+        }
+        catch (PortInUseException)
+        {
+            throw new MessageException(i18N.TranslateFormat("The {0} port is in use.", $"{portName} ({port})"));
+        }
+        catch (PortReservedException)
+        {
+            throw new MessageException(i18N.TranslateFormat("The {0} port is reserved by system.", $"{portName} ({port})"));
+        }
+    }
 
-            if (pNFController != null)
-            {
-                pNFController.Stop();
-            }
-            else if (pTUNTAPController != null)
-            {
-                pTUNTAPController.Stop();
-            }
-            else if (pHTTPController != null)
-            {
-                pHTTPController.Stop();
-            }
+    public static void TryReleaseTcpPort(ushort port, string portName)
+    {
+        foreach (var p in PortHelper.GetProcessByUsedTcpPort(port))
+        {
+            var fileName = p.MainModule?.FileName;
+            if (fileName == null)
+                continue;
 
-            if (pNTTController != null)
+            if (fileName.StartsWith(Global.NetchDir))
             {
-                pNTTController.Stop();
+                p.Kill();
+                p.WaitForExit();
+            }
+            else
+            {
+                throw new MessageException(i18N.TranslateFormat("The {0} port is used by {1}.", $"{portName} ({port})", $"({p.Id}){fileName}"));
             }
         }
 
-        public void KillProcess(string name)
+        PortCheck(port, portName, PortType.TCP);
+    }
+
+    public static Task<NatTypeTestResult> DiscoveryNatTypeAsync(CancellationToken ctx = default)
+    {
+        Debug.Assert(Socks5Server != null, nameof(Socks5Server) + " != null");
+        return Socks5ServerTestUtils.DiscoveryNatTypeAsync(Socks5Server, ctx);
+    }
+
+    public static Task<int?> HttpConnectAsync(CancellationToken ctx = default)
+    {
+        Debug.Assert(Socks5Server != null, nameof(Socks5Server) + " != null");
+        try
         {
-            var processes = Process.GetProcessesByName(name);
-            foreach (var p in processes)
-            {
-                if (IsChildProcess(p, name))
-                {
-                    p.Kill();
-                }
-            }
+            return Socks5ServerTestUtils.HttpConnectAsync(Socks5Server, ctx);
+        }
+        catch (OperationCanceledException)
+        {
+            // ignored
+        }
+        catch (Exception e)
+        {
+            Log.Warning(e, "Unhandled Socks5ServerTestUtils.HttpConnectAsync Exception");
         }
 
-        private static bool IsChildProcess(Process process, string name)
-        {
-            bool result;
-            try
-            {
-                var FileName = (Directory.GetCurrentDirectory() + "\\bin\\" + name + ".exe").ToLower();
-                var procFileName = process.MainModule.FileName.ToLower();
-                result = FileName.Equals(procFileName, StringComparison.Ordinal);
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info(e.Message);
-                result = false;
-            }
-            return result;
-        }
+        return Task.FromResult<int?>(null);
     }
 }

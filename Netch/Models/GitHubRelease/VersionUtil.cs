@@ -1,36 +1,32 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿namespace Netch.Models.GitHubRelease;
 
-namespace Netch.Models.GitHubRelease
+public static class VersionUtil
 {
-    public static class VersionUtil
+    private static VersionComparer instance = new();
+
+    public static int CompareVersion(string x, string y)
     {
-        public static Release GetLatestRelease(IEnumerable<Release> releases, bool isPreRelease)
-        {
-            if (!isPreRelease)
-            {
-                releases = releases.Where(release => !release.prerelease);
-            }
-            releases = releases.Where(release => IsVersionString(release.tag_name));
-            var ordered = releases.OrderByDescending(release => release.tag_name, new VersionComparer());
-            return ordered.ElementAt(0);
-        }
+        return instance.Compare(x, y);
+    }
 
-        private static bool IsVersionString(string str)
+    public class VersionComparer : IComparer<string>
+    {
+        /// <summary>
+        ///     Greater than 0 newer
+        /// </summary>
+        /// <param name="x"></param>
+        /// <param name="y"></param>
+        /// <returns></returns>
+        public int Compare(string? x, string? y)
         {
-            return Version.TryParse(str, out _);
-        }
+            var xResult = SuffixVersion.TryParse(x, out var version1) ? 1 : 0;
+            var yResult = SuffixVersion.TryParse(y, out var version2) ? 1 : 0;
 
-        /// <returns> =0:versions are equal</returns>
-        /// <returns> &gt;0:version1 is greater</returns>
-        /// <returns> &lt;0:version2 is greater</returns>
-        public static int CompareVersion(string v1, string v2)
-        {
-            var version1 = new Version(v1);
-            var version2 = new Version(v2);
-            var res = version1.CompareTo(version2);
-            return res;
+            var parseResult = xResult - yResult;
+            if (parseResult != 0)
+                return parseResult;
+
+            return version1.CompareTo(version2);
         }
     }
 }
